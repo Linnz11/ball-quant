@@ -86,8 +86,8 @@ class _MatchRow:
     """Accumulator for one <tr class="bet-tb-tr"> block."""
 
     __slots__ = (
-        "fid", "home", "away", "match_date", "match_num",
-        "league", "handicap_line", "subactive",
+        "fid", "home", "away", "match_date", "match_time", "buy_end_time",
+        "match_num", "league", "handicap_line", "subactive",
         "nspf", "spf", "bf", "jqs", "bqc",
     )
 
@@ -96,6 +96,15 @@ class _MatchRow:
         self.home = attrs.get("data-homesxname", "")
         self.away = attrs.get("data-awaysxname", "")
         self.match_date = attrs.get("data-matchdate", "")
+        # data-matchtime: "HH:MM" in CST — present on all live 500.com rows.
+        # Empty string when absent (e.g. old cassettes); combined with match_date
+        # → "YYYY-MM-DDTHH:MM" ISO-8601 kickoff in _rows_to_ticai.
+        self.match_time = attrs.get("data-matchtime", "")
+        # data-buyendtime: "YYYY-MM-DD HH:MM:SS" in CST — betting-close deadline (停售).
+        # The analysis pipeline trigger fires at buyendtime − 70min.
+        # Empty string when absent; normalized to ISO-8601 "YYYY-MM-DDTHH:MM:SS" in
+        # _rows_to_ticai (space → T).
+        self.buy_end_time = attrs.get("data-buyendtime", "")
         self.match_num = attrs.get("data-matchnum")
         self.league = attrs.get("data-simpleleague", "")
         # data-rangqiu: negative = home gives handicap, positive = away gives handicap
@@ -301,6 +310,8 @@ def _rows_to_ticai(rows_by_page: Dict[str, List[_MatchRow]]) -> List[TicaiOdds]:
                     "home": row.home,
                     "away": row.away,
                     "match_date": row.match_date,
+                    "match_time": row.match_time,
+                    "buy_end_time": row.buy_end_time,
                     "match_num": row.match_num,
                     "league": row.league,
                     "handicap_line": row.handicap_line,
@@ -323,6 +334,10 @@ def _rows_to_ticai(rows_by_page: Dict[str, List[_MatchRow]]) -> List[TicaiOdds]:
                 m["home"] = row.home
             if row.away and not m["away"]:
                 m["away"] = row.away
+            if row.match_time and not m["match_time"]:
+                m["match_time"] = row.match_time
+            if row.buy_end_time and not m["buy_end_time"]:
+                m["buy_end_time"] = row.buy_end_time
             # Merge odds maps — do not overwrite existing entries (first page wins)
             for dtype in ("nspf", "spf", "bf", "bqc"):
                 src = getattr(row, dtype)
@@ -352,9 +367,29 @@ def _rows_to_ticai(rows_by_page: Dict[str, List[_MatchRow]]) -> List[TicaiOdds]:
         bf_odds    = m["bf"]   if (m["bfdg"]   or m["bfgg"])   else {}
         jqs_odds   = m["jqs"]  if (m["jqdg"]   or m["jqgg"])   else {}
         bqc_odds   = m["bqc"]  if (m["hcdg"]   or m["hcgg"])   else {}
+        # Build ISO-8601 kickoff string ("YYYY-MM-DDTHH:MM" CST) when both date
+        # and time are present.  Neither field is fabricated — both come verbatim
+        # from the same <tr> row; if either is missing we leave kickoff=None.
+        match_date = m["match_date"]
+        match_time = m["match_time"]
+        kickoff: Optional[str] = (
+            f"{match_date}T{match_time}"
+            if match_date and match_time
+            else None
+        )
+        # Build ISO-8601 bet_close string ("YYYY-MM-DDTHH:MM:SS" CST) from
+        # data-buyendtime ("YYYY-MM-DD HH:MM:SS").  Replace the space with T.
+        # This is the 停售 (betting-close) deadline — the trigger fires at
+        # bet_close − 70min.  None when the attribute is absent (no fabrication).
+        raw_bet_close = m["buy_end_time"]
+        bet_close: Optional[str] = (
+            raw_bet_close.replace(" ", "T", 1)
+            if raw_bet_close
+            else None
+        )
         result.append(TicaiOdds(
             match_id=fid,
-            match_date=m["match_date"],
+            match_date=match_date,
             league=m["league"],
             home=m["home"],
             away=m["away"],
@@ -365,6 +400,8 @@ def _rows_to_ticai(rows_by_page: Dict[str, List[_MatchRow]]) -> List[TicaiOdds]:
             correct_score=bf_odds,
             total_goals=jqs_odds,
             hafu=bqc_odds,
+            kickoff=kickoff,
+            bet_close=bet_close,
             spf_danjuan=m["nspfdg"],
             spf_guoguan=m["nspfgg"],
             rqspf_danjuan=m["spfdg"],

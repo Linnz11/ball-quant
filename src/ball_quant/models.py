@@ -32,6 +32,18 @@ class TicaiOdds:
     correct_score: Dict[str, float]
     total_goals: Dict[int, float]
     hafu: Dict[str, float]
+    # Kickoff datetime in CST (China Standard Time, UTC+8).
+    # ISO-8601 format: "YYYY-MM-DDTHH:MM", e.g. "2026-06-19T00:00".
+    # Optional — None when the source page carries no parseable time (e.g. old cassettes
+    # without data-matchtime).  Never fabricated: always sourced from data-matchdate +
+    # data-matchtime on the 500.com <tr class="bet-tb-tr"> row.
+    kickoff: Optional[str] = None
+    # Betting-close deadline (停售) in CST.
+    # ISO-8601 format: "YYYY-MM-DDTHH:MM:SS", e.g. "2026-06-18T22:00:00".
+    # Sourced from data-buyendtime on the same <tr> row; space replaced with T.
+    # The analysis pipeline trigger fires at bet_close − 70min.
+    # Optional — None when data-buyendtime is absent (e.g. old cassettes).
+    bet_close: Optional[str] = None
     # Per-玩法 sale-mode flags: True = that channel (单关/过关) is open for betting.
     # Sourced from data-subactive on the C500 page; False when absent or explicitly 0.
     spf_danjuan: bool = False

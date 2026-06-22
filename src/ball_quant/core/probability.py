@@ -421,6 +421,10 @@ def fit_score_distribution(
     matrix: EventMarketMatrix,
     params: StrategyParams = DEFAULT_PARAMS,
 ) -> ScoreDistribution:
+    # Opt-in soft-calibration path (§1b).  Gated so the default IPF route below
+    # is reached byte-for-byte whenever use_softcal is False.
+    if params.use_softcal:
+        return fit_score_distribution_soft(match, matrix, params=params).distribution
     home_lambda, away_lambda = prior_lambdas(matrix, params=params)
     # Pass Dixon-Coles rho so the low-score tau correction fires when toggled.
     # rho=0.0 (default) leaves the grid byte-identical to independent Poisson.
@@ -737,6 +741,683 @@ def apply_constraint(
     for score, prob in probs.items():
         adjusted[score] = prob * (in_scale if constraint.predicate(score[0], score[1]) else out_scale)
     return normalize_probs(adjusted)
+
+
+# =====================================================================
+# Soft-calibration path (REFACTOR_PLAN §1b)
+# ---------------------------------------------------------------------
+# Replaces multiplicative IPF (exact marginal projection) with a single
+# regularised objective solved by exponentiated-gradient mirror descent:
+#
+#     min_q  KL(q || q0)  +  Sigma_g  alpha_g * loss_g(B_g q, p_g)
+#
+# where q0 is an independent-Poisson x Dixon-Coles prior, B_g projects the
+# score grid onto market g's event, p_g is the devig'd book target, and
+# alpha_g is a reliability weight (inverse variance x staleness decay) with
+# per-market AND per-family caps.  loss_g is KL for multi-outcome families
+# and Huber-logit for binary rungs.
+#
+# IRON LAW (§1b): coherence != accuracy.  Mirror descent ALWAYS returns a
+# self-consistent grid; precision lives entirely in the alpha weighting
+# (family caps / staleness / devig variance), never in the solver.  A large
+# residual on a deep, liquid family is a mispricing SIGNAL, not truth.
+# =====================================================================
+
+# Trust-region radius (in natural-log space) for one mirror-descent step.  A
+# cell's mass may change by at most exp(±2.0) ≈ 7.4x per iteration.  WHY needed:
+# the logit/KL loss derivatives carry a 1/(bq*(1-bq)) factor that explodes for
+# cells whose family projection sits near 0 or 1, so an unclamped step can
+# overflow math.exp.  This bounds the step without moving the fixed point (at
+# the optimum the unclamped step is already small).
+_SOFTCAL_TRUST_RADIUS = 2.0
+
+
+@dataclass
+class SoftMarket:
+    """One calibration target for the soft path.
+
+    family groups near-collinear ladder rungs (e.g. all 总进球 lines share
+    family='totals') so a single family cap can bound their summed weight.
+    is_binary selects Huber-logit (True) vs KL (False) loss.  outcomes maps a
+    multi-outcome family's outcome label -> predicate; for binary markets it is
+    the single {'yes': predicate} rung and target is P(yes).
+    """
+
+    family: str
+    is_binary: bool
+    target: float                       # devig'd book prob of the 'yes'/event leg
+    predicate: Callable[[int, int], bool]
+    alpha: float                        # reliability weight (post-cap applied later)
+    spread: float                       # for diagnostics / z-score sigma
+    sigma: float                        # sqrt(sigma^2_g): standardises the residual
+    label: str
+    thin: bool                          # alpha below thin threshold -> shrink toward q0
+
+
+@dataclass
+class SoftProjection:
+    """A single market projection in the soft-calibration output bundle."""
+
+    label: str
+    family: str
+    model_prob: float                   # B_g q (calibrated grid projection)
+    book_prob: Optional[float]          # devig'd book target, if a market existed
+    z_residual: Optional[float]         # |B_g q - p_g| / sigma_g (standardised)
+    sigma: Optional[float]
+    market_influence: Optional[float]   # alpha_g / total alpha mass (0..1)
+    thin: bool
+
+
+@dataclass
+class SoftCalibrationResult:
+    """Full §1b output that feeds the LLM/bundle reference layer.
+
+    distribution is the calibrated grid (drop-in for the IPF ScoreDistribution).
+    projections, tail_prob, q_band and no_bet_reason are the richer signals the
+    reference layer consumes; they do NOT alter the bundle's edge math (the
+    code never emits a bet — see REFACTOR_PLAN §0).
+    """
+
+    distribution: ScoreDistribution
+    prior: Dict[Tuple[int, int], float]
+    projections: List[SoftProjection]
+    tail_prob: float                    # explicit P(home+away >= tail_threshold)
+    iterations: int
+    converged: bool
+    q_band: float                       # spread of standardised residuals (dispersion)
+    no_bet_reason: Optional[str]
+
+
+def reliability_weight(
+    quote: MarketQuote,
+    devig_var: float,
+    params: StrategyParams,
+) -> Tuple[float, float, float]:
+    """Return (alpha_g, sigma_g, spread) for one quote (§1b reliability term).
+
+        sigma^2_g = c_spread*spread^2 + c_depth/log(1+depth) + c_vol/log(1+vol)
+                    + c_age*age + c_devig*devig_var + sigma_floor^2
+        alpha_g   = (1/sigma^2_g) * exp(-age/half_life)
+
+    HONEST STDLIB LIMIT: MarketQuote has no `depth` and no timestamp field.
+    depth is proxied by `liquidity` (the only depth-like quantity on the model).
+    age is read from quote.raw['fetched_at'] / ['age'] when an ingest happens to
+    provide it, else 0.0 — so the staleness terms degrade to neutral rather than
+    being fabricated.  Wiring a real fetch-time is a model-layer change, out of
+    scope for this pure-engine upgrade.
+    """
+    spread = quote.spread
+    if spread is None and quote.bid is not None and quote.ask is not None:
+        spread = abs(quote.ask - quote.bid)
+    spread = abs(spread) if spread is not None else 0.0
+
+    # depth proxy: liquidity is the only depth-like field on MarketQuote.
+    depth = quote.liquidity if quote.liquidity is not None else 0.0
+    depth = max(0.0, depth)
+    vol = quote.volume if quote.volume is not None else 0.0
+    vol = max(0.0, vol)
+
+    # age: only present if the ingest layer stashed a fetch time / age in raw.
+    age = 0.0
+    raw = quote.raw or {}
+    if "age" in raw:
+        try:
+            age = max(0.0, float(raw["age"]))
+        except (TypeError, ValueError):
+            age = 0.0
+
+    # Each 1/log(1+x) term diverges as x->0, so a zero depth/volume must map to
+    # the bare coefficient (maximal-but-finite uncertainty) rather than +inf.
+    depth_term = params.softcal_c_depth / math.log(1.0 + depth) if depth > 0.0 else params.softcal_c_depth
+    vol_term = params.softcal_c_vol / math.log(1.0 + vol) if vol > 0.0 else params.softcal_c_vol
+    sigma_sq = (
+        params.softcal_c_spread * spread * spread
+        + depth_term
+        + vol_term
+        + params.softcal_c_age * age
+        + params.softcal_c_devig * devig_var
+        + params.softcal_sigma_floor * params.softcal_sigma_floor
+    )
+
+    decay = math.exp(-age / params.softcal_half_life) if params.softcal_half_life > 0.0 else 1.0
+    alpha = (1.0 / sigma_sq) * decay
+    sigma = math.sqrt(sigma_sq)
+    return alpha, sigma, spread
+
+
+def devig_variance(targets: List[float]) -> float:
+    """Cross-devig-map disagreement variance (the c_devig*devig_var term).
+
+    Given the SAME market priced through several devig maps (proportional /
+    Shin / logit), the spread of recovered fair probs measures model risk in the
+    devig step.  Population variance; 0.0 when fewer than two maps agree on a
+    value, which is the conservative floor (no extra penalty).
+    """
+    vals = [t for t in targets if t is not None]
+    if len(vals) < 2:
+        return 0.0
+    mean = sum(vals) / len(vals)
+    return sum((v - mean) ** 2 for v in vals) / len(vals)
+
+
+def logit_devig(raw_probs: List[float]) -> List[float]:
+    """Additive-logit devig map for the cross-map variance term.
+
+    Removes vig by subtracting a single common constant c from every implied
+    probability's log-odds, so that sum_i sigmoid(logit(r_i) - c) = 1.  c is
+    solved by bisection (mirroring shin_devig).  This is a GENUINELY distinct
+    map from proportional (which scales in probability space) and Shin (which
+    uses an insider-fraction model): an additive logit shift is multiplicative
+    in the odds ratio, so the three maps disagree exactly where the vig
+    structure is ambiguous — that disagreement is the devig-variance signal the
+    reliability weight consumes.  A fair book (booksum 1) yields c=0 and returns
+    the inputs unchanged.
+    """
+    n = len(raw_probs)
+    if n == 0:
+        return []
+    clamped = [min(1.0 - 1e-9, max(1e-9, r)) for r in raw_probs]
+    logits = [math.log(p / (1.0 - p)) for p in clamped]
+
+    def fair(c: float) -> List[float]:
+        return [1.0 / (1.0 + math.exp(-(z - c))) for z in logits]
+
+    def residual(c: float) -> float:
+        return sum(fair(c)) - 1.0
+
+    # sum(fair(c)) is strictly decreasing in c (every sigmoid falls as c rises),
+    # so the root is bracketed and bisection is monotone-safe.  Wide bracket
+    # covers any realistic booksum.
+    lo, hi = -40.0, 40.0
+    res_lo = residual(lo)
+    if abs(res_lo) < 1e-12:
+        return fair(lo)
+    for _ in range(80):   # 80 bisection steps over an 80-wide bracket -> ~1e-22
+        mid = (lo + hi) * 0.5
+        if residual(mid) * res_lo > 0:
+            lo = mid
+        else:
+            hi = mid
+    return fair((lo + hi) * 0.5)
+
+
+def _binary_devig_maps(positive: float, negative: Optional[float]) -> List[float]:
+    """Recover the 'yes' fair prob under several devig maps for one binary rung.
+
+    Returns the list of 'yes' estimates (proportional, Shin, logit) so
+    devig_variance() can measure their disagreement.  When only one side is
+    present the maps coincide (no disagreement signal available).
+    """
+    if negative is None:
+        return [clamp_probability(positive)]
+    pair = [clamp_probability(positive), clamp_probability(negative)]
+    proportional = pair[0] / (pair[0] + pair[1]) if (pair[0] + pair[1]) > 0 else 0.5
+    shin = shin_devig(pair)[0]
+    logit = logit_devig(pair)[0]
+    return [proportional, shin, logit]
+
+
+def dixon_coles_prior(
+    home_lambda: float,
+    away_lambda: float,
+    params: StrategyParams,
+) -> Dict[Tuple[int, int], float]:
+    """q0 = independent Poisson(lambda_h, lambda_a) x Dixon-Coles rho.
+
+    Reuses poisson_grid (which already applies the tau low-score correction
+    when rho != 0).  bivariate-Poisson lambda3 stays OFF here by construction:
+    DC corrects low-score *dependence*, lambda3 would add goal *correlation +
+    total variance*; they are complementary, not substitutes (§1b).  lambda3 is
+    only sound with a historical calibration set, which this engine does not
+    have, so it is deliberately absent rather than guessed.
+    """
+    return poisson_grid(home_lambda, away_lambda, params.max_goals, rho=params.dixon_coles_rho)
+
+
+def build_soft_markets(
+    match: MatchSP,
+    matrix: EventMarketMatrix,
+    params: StrategyParams,
+) -> List[SoftMarket]:
+    """Assemble §1b soft targets from ALL ladder rungs (the precision core).
+
+    Every handicap line and every totals line is consumed (not just one), so
+    the net-margin and goal-mean/variance/tail are recovered from the whole
+    ladder.  Each rung carries its own reliability alpha; rungs sharing a family
+    are capped together downstream (apply_family_caps).
+    """
+    markets: List[SoftMarket] = []
+
+    # --- 1X2 (multi-outcome family, KL loss) -------------------------------
+    ml_targets = normalized_moneyline_probabilities(matrix, params=params)
+    if ml_targets:
+        predicates = {
+            "home": lambda h, a: h > a,
+            "draw": lambda h, a: h == a,
+            "away": lambda h, a: h < a,
+        }
+        for outcome, target in ml_targets.items():
+            quote = best_usable_quote(matrix, "moneyline", outcome)
+            if quote is None:
+                continue
+            # devig disagreement across the three-way book for this outcome.
+            dvar = _three_way_devig_variance(matrix, outcome, params)
+            alpha, sigma, spread = reliability_weight(quote, dvar, params)
+            markets.append(SoftMarket(
+                family="1x2",
+                is_binary=False,
+                target=clamp_probability(target),
+                predicate=predicates[outcome],
+                alpha=alpha,
+                spread=spread,
+                sigma=sigma,
+                label=f"1x2:{outcome}",
+                thin=alpha < params.softcal_thin_alpha,
+            ))
+
+    # --- Totals ladder (binary rungs, Huber-logit) -------------------------
+    totals_groups: Dict[float, Dict[str, MarketQuote]] = {}
+    for quote in matrix.quotes("total_goals"):
+        if not quote_is_usable(quote):
+            continue
+        parsed = parse_total_quote(quote)
+        if not parsed or quote.probability is None:
+            continue
+        side, line, is_complement = parsed
+        if is_complement:
+            side = "under" if side == "over" else "over"
+        prev = totals_groups.setdefault(line, {}).get(side)
+        if prev is None or quote_quality(quote) > quote_quality(prev):
+            totals_groups[line][side] = quote
+    for line, sides in totals_groups.items():
+        over_q, under_q = sides.get("over"), sides.get("under")
+        target = binary_target(over_q, under_q)
+        if target is None:
+            continue
+        over_p = market_probability(over_q) if over_q else None
+        under_p = market_probability(under_q) if under_q else None
+        dvar = devig_variance(_binary_devig_maps(
+            over_p if over_p is not None else (1.0 - under_p),
+            under_p,
+        ))
+        rep = over_q if over_q is not None else under_q
+        alpha, sigma, spread = reliability_weight(rep, dvar, params)
+        markets.append(SoftMarket(
+            family="totals",
+            is_binary=True,
+            target=clamp_probability(target),
+            predicate=lambda h, a, line=line: h + a > line,
+            alpha=alpha,
+            spread=spread,
+            sigma=sigma,
+            label=f"totals:over:{line:.1f}",
+            thin=alpha < params.softcal_thin_alpha,
+        ))
+
+    # --- Handicap ladder (binary rungs, Huber-logit) -----------------------
+    hc_groups: Dict[Tuple[str, float], Tuple[MarketQuote, float]] = {}
+    for quote in matrix.quotes("handicap"):
+        if not quote_is_usable(quote):
+            continue
+        parsed = parse_handicap_quote(quote, match.home, match.away)
+        if not parsed or quote.probability is None:
+            continue
+        team, line, is_complement = parsed
+        target = market_probability(quote)
+        if is_complement:
+            target = 1.0 - target
+        key = (team, line)
+        existing = hc_groups.get(key)
+        if existing is None or quote_quality(quote) > quote_quality(existing[0]):
+            hc_groups[key] = (quote, target)
+    for (team, line), (quote, target) in hc_groups.items():
+        if normalize_key(team) == normalize_key(match.home):
+            predicate = lambda h, a, line=line: h + line > a
+        elif normalize_key(team) == normalize_key(match.away):
+            predicate = lambda h, a, line=line: a + line > h
+        else:
+            continue
+        dvar = devig_variance(_binary_devig_maps(target, 1.0 - target))
+        alpha, sigma, spread = reliability_weight(quote, dvar, params)
+        markets.append(SoftMarket(
+            family="handicap",
+            is_binary=True,
+            target=clamp_probability(target),
+            predicate=predicate,
+            alpha=alpha,
+            spread=spread,
+            sigma=sigma,
+            label=f"handicap:{team}:{line:+.1f}",
+            thin=alpha < params.softcal_thin_alpha,
+        ))
+
+    # --- BTTS (binary) -----------------------------------------------------
+    yes_q = best_usable_quote(matrix, "btts", "yes")
+    no_q = best_usable_quote(matrix, "btts", "no")
+    btts_target = binary_target(yes_q, no_q)
+    if btts_target is not None:
+        rep = yes_q if yes_q is not None else no_q
+        yes_p = market_probability(yes_q) if yes_q else None
+        no_p = market_probability(no_q) if no_q else None
+        dvar = devig_variance(_binary_devig_maps(
+            yes_p if yes_p is not None else (1.0 - no_p), no_p,
+        ))
+        alpha, sigma, spread = reliability_weight(rep, dvar, params)
+        markets.append(SoftMarket(
+            family="btts",
+            is_binary=True,
+            target=clamp_probability(btts_target),
+            predicate=lambda h, a: h > 0 and a > 0,
+            alpha=alpha,
+            spread=spread,
+            sigma=sigma,
+            label="btts:yes",
+            thin=alpha < params.softcal_thin_alpha,
+        ))
+
+    return markets
+
+
+def _three_way_devig_variance(
+    matrix: EventMarketMatrix,
+    outcome: str,
+    params: StrategyParams,
+) -> float:
+    """devig_var for one 1X2 outcome across proportional / Shin / logit maps."""
+    raws = []
+    for o in ("home", "draw", "away"):
+        q = best_usable_quote(matrix, "moneyline", o)
+        raws.append(market_probability(q) if q is not None else None)
+    present = [(i, r) for i, r in enumerate(raws) if r is not None]
+    if len(present) < 2:
+        return 0.0
+    idx = {"home": 0, "draw": 1, "away": 2}[outcome]
+    vals = [r for _, r in present]
+    booksum = sum(vals)
+    estimates = []
+    # proportional
+    if booksum > 0 and raws[idx] is not None:
+        estimates.append(raws[idx] / booksum)
+    # Shin
+    shin = shin_devig(vals)
+    pos = [i for i, (orig_i, _) in enumerate(present) if orig_i == idx]
+    if pos and raws[idx] is not None:
+        estimates.append(shin[pos[0]])
+    # logit
+    lg = logit_devig(vals)
+    if pos and raws[idx] is not None:
+        estimates.append(lg[pos[0]])
+    return devig_variance(estimates)
+
+
+def apply_family_caps(markets: List[SoftMarket], params: StrategyParams) -> List[SoftMarket]:
+    """Cap per-market AND per-family reliability mass (§1b correlation control).
+
+    Per-market cap bounds any single book.  Family cap bounds the SUM of alpha
+    across a ladder (总进球 / 让球): adjacent lines are near-collinear, so an
+    N-rung ladder must NOT contribute N x the weight of one independent market.
+    When a family's summed alpha exceeds the cap, every rung in it is scaled by
+    cap/sum (preserving relative trust within the family).  This is THE place
+    §1b precision lives — not the solver.
+    """
+    capped: List[SoftMarket] = []
+    for m in markets:
+        a = min(m.alpha, params.softcal_alpha_per_market_cap)
+        capped.append(SoftMarket(
+            family=m.family, is_binary=m.is_binary, target=m.target,
+            predicate=m.predicate, alpha=a, spread=m.spread, sigma=m.sigma,
+            label=m.label, thin=m.thin,
+        ))
+    family_mass: Dict[str, float] = {}
+    for m in capped:
+        family_mass[m.family] = family_mass.get(m.family, 0.0) + m.alpha
+    scaled: List[SoftMarket] = []
+    for m in capped:
+        mass = family_mass[m.family]
+        if mass > params.softcal_alpha_family_cap and mass > 0.0:
+            factor = params.softcal_alpha_family_cap / mass
+            scaled.append(SoftMarket(
+                family=m.family, is_binary=m.is_binary, target=m.target,
+                predicate=m.predicate, alpha=m.alpha * factor, spread=m.spread,
+                sigma=m.sigma, label=m.label, thin=m.thin,
+            ))
+        else:
+            scaled.append(m)
+    return scaled
+
+
+def _project(probs: Dict[Tuple[int, int], float], predicate: Callable[[int, int], bool]) -> float:
+    """B_g q: probability mass of the cells satisfying market g's event."""
+    return sum(p for s, p in probs.items() if predicate(s[0], s[1]))
+
+
+def _shrink_target(market: SoftMarket, q0: Dict[Tuple[int, int], float], params: StrategyParams) -> float:
+    """Thin-shrinkage: p_used = beta*p_poly + (1-beta)*B_g q0 (§1b).
+
+    Only thin/stale markets are shrunk; a liquid market's book price is trusted
+    as-is.  Shrinking pulls the noisy target toward the prior projection exactly
+    where the book is least reliable, borrowing strength from q0.
+    """
+    if not market.thin:
+        return market.target
+    beta = params.softcal_shrink_beta
+    return beta * market.target + (1.0 - beta) * _project(q0, market.predicate)
+
+
+def calibrate_distribution_soft(
+    q0: Dict[Tuple[int, int], float],
+    markets: List[SoftMarket],
+    params: StrategyParams,
+) -> Tuple[Dict[Tuple[int, int], float], int, bool]:
+    """Exponentiated-gradient mirror descent (§1b solver).
+
+    Minimise  KL(q || q0) + Sigma_g alpha_g * loss_g(B_g q, p_g)  over the
+    simplex.  Mirror-descent step in the entropy geometry is multiplicative:
+
+        q_i <- q_i * exp(-eta * grad_i),  then renormalise   (eta constant).
+
+    The TOTAL objective gradient in each cell is the sum of the regulariser and
+    the data terms:
+
+        grad_i = lambda_reg * (log(q_i) - log(q0_i))         # d/dlog of KL(q||q0)
+               + Sigma_g alpha_g * dloss_g/d(B_g q) * 1[i in g]   # data push
+
+    lambda_reg (softcal_kl_weight) sets how hard the prior pulls back: small
+    lambda_reg lets RELIABLE data (large alpha_g) move q well off q0, while the
+    prior still anchors cells no market constrains.  Note the prior enters
+    through its GRADIENT, not a forced blend toward q0 — so the data/prior
+    balance is governed by alpha_g vs lambda_reg, exactly as §1b intends.  Only
+    math.exp/log are used (no numpy); renormalisation keeps q on the simplex and
+    strictly positive.
+
+    Returns (q, iterations_run, converged).  IRON LAW: this ALWAYS returns a
+    coherent grid; the returned coherence is NOT evidence of accuracy.
+    """
+    q = dict(q0)
+    log_q0 = {s: math.log(p) if p > 0.0 else -50.0 for s, p in q0.items()}
+    converged = False
+    iters_run = 0
+    delta = params.softcal_huber_delta
+    lambda_reg = params.softcal_kl_weight
+    eta = params.softcal_eta
+
+    # Mean-normalise the reliability weights to O(1).  WHY (the crux of solver
+    # stability): the data-loss derivative carries a 1/(bq*(1-bq)) factor, so the
+    # gradient Lipschitz constant scales with alpha.  Raw alpha on the order of
+    # tens pushes the constant-step stability ceiling far below any usable eta,
+    # so the trust clip would bind every iteration and the iterate would
+    # OSCILLATE (a different "coherent" grid for every eta — the precise IRON-LAW
+    # trap).  Dividing every alpha by the mean preserves all RELATIVE weights —
+    # the §1b precision content (family caps, devig-variance, staleness ranking)
+    # is untouched — while putting the objective in a well-conditioned regime
+    # where a constant eta converges to the UNIQUE optimum independent of eta.
+    active = [m for m in markets if m.alpha > 0.0]
+    mean_alpha = (sum(m.alpha for m in active) / len(active)) if active else 1.0
+    norm_alpha = {id(m): (m.alpha / mean_alpha if mean_alpha > 0.0 else 0.0) for m in active}
+
+    # Track market projections B_g q for an HONEST convergence test: convergence
+    # is declared on max|delta B_g q| (the quantities we actually fit), which
+    # vanishes only when the iterate is genuinely stationary.  A constant eta
+    # means this CANNOT be faked by step-size decay.
+    prev_proj = {m.label: _project(q, m.predicate) for m in active}
+
+    for t in range(params.softcal_max_iters):
+        iters_run = t + 1
+
+        # Accumulate the data-loss gradient per cell from the normalised weights.
+        grad: Dict[Tuple[int, int], float] = {s: 0.0 for s in q}
+        for m in active:
+            a = norm_alpha[id(m)]
+            if a <= 0.0:
+                continue
+            bq = _project(q, m.predicate)
+            p_used = _shrink_target(m, q0, params)
+            if m.is_binary:
+                g = a * _huber_logit_grad(bq, p_used, delta)
+            else:
+                g = a * _kl_binary_grad(bq, p_used)
+            if g == 0.0:
+                continue
+            for s in grad:
+                if m.predicate(s[0], s[1]):
+                    grad[s] += g
+
+        # Exponentiated-gradient step q_i <- q_i * exp(-eta * total_grad_i).  Two
+        # safety rails (neither moves the fixed point — at the optimum the step
+        # is already small and the clip does not bind):
+        #   (1) trust-region clip on the per-cell log step;
+        #   (2) log-sum-exp shift before exp — exact, because the immediate
+        #       renormalisation is invariant to a constant additive log shift.
+        new_log_weights: Dict[Tuple[int, int], float] = {}
+        for s, qi in q.items():
+            log_qi = math.log(qi) if qi > 0.0 else -50.0
+            total_grad = lambda_reg * (log_qi - log_q0[s]) + grad[s]
+            step = -eta * total_grad
+            if step > _SOFTCAL_TRUST_RADIUS:
+                step = _SOFTCAL_TRUST_RADIUS
+            elif step < -_SOFTCAL_TRUST_RADIUS:
+                step = -_SOFTCAL_TRUST_RADIUS
+            new_log_weights[s] = log_qi + step
+
+        shift = max(new_log_weights.values())
+        new_q = {s: math.exp(lw - shift) for s, lw in new_log_weights.items()}
+        total = sum(new_q.values())
+        if total <= 0.0:
+            # Degenerate (all mass underflowed): keep previous coherent grid.
+            break
+        q = {s: v / total for s, v in new_q.items()}
+
+        proj = {m.label: _project(q, m.predicate) for m in active}
+        max_dproj = max((abs(proj[k] - prev_proj[k]) for k in proj), default=0.0)
+        prev_proj = proj
+        if max_dproj < params.softcal_tol:
+            converged = True
+            break
+
+    return q, iters_run, converged
+
+
+def _kl_binary_grad(bq: float, p: float) -> float:
+    """d/d(bq) of the binary KL  p*log(p/bq) + (1-p)*log((1-p)/(1-bq)).
+
+    = -p/bq + (1-p)/(1-bq).  Pushes bq toward p; clamped denominators keep it
+    finite at the simplex edges.
+    """
+    bq_c = min(1.0 - 1e-9, max(1e-9, bq))
+    p_c = min(1.0 - 1e-9, max(1e-9, p))
+    return -p_c / bq_c + (1.0 - p_c) / (1.0 - bq_c)
+
+
+def _huber_logit_grad(bq: float, p: float, delta: float) -> float:
+    """Gradient of Huber loss on the logit residual r = logit(bq) - logit(p).
+
+    WHY logit + Huber (not KL): KL over-reacts to a badly-priced book (its
+    gradient blows up near the simplex edge), so one stale rung can dominate.
+    Huber is quadratic for |r| <= delta and linear beyond, bounding any single
+    rung's pull.  Chain rule: dL/d(bq) = huber'(r) * dr/d(bq), and
+    dr/d(bq) = 1/(bq*(1-bq)).
+    """
+    bq_c = min(1.0 - 1e-9, max(1e-9, bq))
+    p_c = min(1.0 - 1e-9, max(1e-9, p))
+    r = math.log(bq_c / (1.0 - bq_c)) - math.log(p_c / (1.0 - p_c))
+    huber_deriv = r if abs(r) <= delta else delta * (1.0 if r > 0 else -1.0)
+    return huber_deriv / (bq_c * (1.0 - bq_c))
+
+
+def fit_score_distribution_soft(
+    match: MatchSP,
+    matrix: EventMarketMatrix,
+    params: StrategyParams = DEFAULT_PARAMS,
+) -> SoftCalibrationResult:
+    """§1b entry point: prior -> soft markets -> mirror descent -> rich output.
+
+    Returns a SoftCalibrationResult whose .distribution is a drop-in
+    ScoreDistribution and whose projections/tail/q_band/no_bet_reason feed the
+    LLM reference layer.  The code still never emits a bet (REFACTOR_PLAN §0).
+    """
+    home_lambda, away_lambda = prior_lambdas(matrix, params=params)
+    q0 = dixon_coles_prior(home_lambda, away_lambda, params)
+    markets = apply_family_caps(build_soft_markets(match, matrix, params), params)
+
+    if not markets:
+        dist = ScoreDistribution(q0, max_goals=params.max_goals)
+        return SoftCalibrationResult(
+            distribution=dist, prior=q0, projections=[],
+            tail_prob=_tail_probability(q0, params.softcal_tail_threshold),
+            iterations=0, converged=True, q_band=0.0,
+            no_bet_reason="no usable markets — prior only",
+        )
+
+    q, iters, converged = calibrate_distribution_soft(q0, markets, params)
+    dist = ScoreDistribution(q, max_goals=params.max_goals)
+
+    total_alpha = sum(m.alpha for m in markets) or 1.0
+    projections: List[SoftProjection] = []
+    z_values: List[float] = []
+    for m in markets:
+        bq = _project(q, m.predicate)
+        z = abs(bq - m.target) / m.sigma if m.sigma > 0.0 else None
+        if z is not None:
+            z_values.append(z)
+        projections.append(SoftProjection(
+            label=m.label, family=m.family, model_prob=bq, book_prob=m.target,
+            z_residual=z, sigma=m.sigma,
+            market_influence=m.alpha / total_alpha, thin=m.thin,
+        ))
+
+    # q_band: dispersion of standardised residuals.  Wide band = the families
+    # disagree (model can't satisfy all books) -> low confidence / possible
+    # mispricing; narrow band = independent liquid families concur (§1b: trust
+    # where multiple independent liquid families agree).
+    q_band = (max(z_values) - min(z_values)) if z_values else 0.0
+    tail = _tail_probability(q, params.softcal_tail_threshold)
+
+    # Non-convergence takes priority: a grid that did not reach the optimum in
+    # max_iters is NOT authoritative, so surface it through the §1b output
+    # contract rather than letting a downstream consumer silently trust it.
+    no_bet_reason = None
+    if not converged:
+        no_bet_reason = f"solver did not converge in {iters} iters — grid not authoritative"
+    elif all(m.thin for m in markets):
+        no_bet_reason = "all markets thin/stale — grid is mostly prior"
+    elif q_band > 3.0:
+        # A large residual on a deep family is a SIGNAL candidate, not truth.
+        no_bet_reason = "family disagreement high (q_band>3) — coherent grid may be stitched noise"
+
+    return SoftCalibrationResult(
+        distribution=dist, prior=q0, projections=projections, tail_prob=tail,
+        iterations=iters, converged=converged, q_band=q_band,
+        no_bet_reason=no_bet_reason,
+    )
+
+
+def _tail_probability(probs: Dict[Tuple[int, int], float], threshold: int) -> float:
+    """Explicit P(home+away >= threshold) — the '8+' bucket (§1b).
+
+    Reported as a first-class aggregate so the score layer sees real tail mass
+    instead of silently-truncated-then-renormalised mass.
+    """
+    return sum(p for (h, a), p in probs.items() if h + a >= threshold)
 
 
 def quote_quality(quote: Optional[MarketQuote], params: StrategyParams = DEFAULT_PARAMS) -> float:

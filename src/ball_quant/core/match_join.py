@@ -223,7 +223,16 @@ def pair_one(
                 or ""
             )
             _sm = _SLUG_DATE_RE.search(slug)
-            m_date = _parse_date(_sm.group(1)) if _sm else None
+            if _sm:
+                m_date = _parse_date(_sm.group(1))
+            else:
+                # Fallback for matrices without a dated slug: the raw_event date
+                # field (ISO-truncated). On real Polymarket data the slug is always
+                # present, so this only serves synthetic/edge inputs.
+                _raw = matrix.raw_event.get("start_date") or matrix.raw_event.get(
+                    "startDate"
+                )
+                m_date = _parse_date(str(_raw)[:10]) if _raw else None
             if m_date is not None:
                 delta = abs((ticai_date - m_date).days)
                 if delta > date_tolerance_days:

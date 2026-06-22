@@ -268,6 +268,52 @@ def build_parser() -> argparse.ArgumentParser:
         help="Max WC events to fetch from Polymarket tag crawl (only used with --live)",
     )
 
+    # ---- bundle -------------------------------------------------------------
+    bnd = sub.add_parser(
+        "bundle",
+        help="Emit per-match RAW data bundle (Poly all-angles + 体彩 + flags + KG) for the LLM — no edge, no slip",
+    )
+    bnd.add_argument("--date", required=True, help="Match date YYYY-MM-DD")
+    bnd_src = bnd.add_mutually_exclusive_group(required=True)
+    bnd_src.add_argument(
+        "--c500-live", dest="c500_live", action="store_true",
+        help="Fetch fresh 竞彩 odds from trade.500.com",
+    )
+    bnd_src.add_argument(
+        "--c500-cache", dest="c500_cache", default=None,
+        help="Directory with c500_*.html cassettes for offline replay",
+    )
+    bnd.add_argument("--kg", dest="kg_path", default=None, help="KG teams.json path (default: data/kg/teams.json)")
+    bnd.add_argument(
+        "--out", dest="out", default=None,
+        help="Output basename; writes <out>.json + <out>.md (default reports/bundle_<date>)",
+    )
+    bnd.add_argument(
+        "--forecast-ledger", dest="forecast_ledger", default=None,
+        help="Path for forecast ledger JSONL (default: data/forecasts/ledger.jsonl)",
+    )
+
+    grd = sub.add_parser(
+        "grade",
+        help="Grade forecast ledger vs results → calibration table (Brier/log-loss/ECE per forecaster×market)",
+    )
+    grd.add_argument(
+        "--results", required=True,
+        help="CSV of actual scores: match_id,home_score,away_score[,void]",
+    )
+    grd.add_argument(
+        "--ledger", default=None,
+        help="Forecast ledger JSONL path (default: data/forecasts/ledger.jsonl)",
+    )
+    grd.add_argument(
+        "--date", default=None,
+        help="Filter ledger by match_date YYYY-MM-DD (default: all dates, accumulates)",
+    )
+    grd.add_argument(
+        "--out", default=None,
+        help="Write calibration report to this file (default: print only)",
+    )
+
     return parser
 
 
@@ -287,6 +333,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return poly_match(args)
     if args.command == "poly-schedule":
         return poly_schedule(args)
+    if args.command == "bundle":
+        return cmd_bundle(args, settings)
     if args.command == "auto-refresh":
         return auto_refresh(args)
     if args.command == "run":
@@ -303,6 +351,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_recommend(args, settings)
     if args.command == "kg-build":
         return cmd_kg_build(args)
+    if args.command == "grade":
+        return cmd_grade(args, settings)
     parser.print_help()
     return 1
 
@@ -1486,6 +1536,111 @@ def _build_recommend_json(
             for u in unmatched
         ],
     }
+
+
+def cmd_bundle(args: argparse.Namespace, settings: Settings) -> int:
+    """Emit the per-match RAW data bundle for the LLM analyst. No edge, no slip."""
+    import json
+    import logging as _logging
+
+    from ball_quant.core import bundle as bundle_mod
+
+    bundles, unmatched = bundle_mod.run_bundle(
+        date=args.date,
+        c500_cache=getattr(args, "c500_cache", None),
+        kg_path=getattr(args, "kg_path", None),
+    )
+    md = bundle_mod.render_bundle_markdown(bundles, args.date)
+    out_base = args.out or f"reports/bundle_{args.date}"
+    json_path = Path(out_base + ".json")
+    md_path = Path(out_base + ".md")
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        json.dumps(bundles, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    md_path.write_text(md, encoding="utf-8")
+    print(f"Bundle: {len(bundles)} matches paired, {len(unmatched)} 体彩 unmatched.")
+    print(f"JSON: {json_path}")
+    print(f"MD:   {md_path}")
+
+    # --- persist forecast ledger (non-fatal) ---
+    try:
+        from ball_quant.core.forecast_ledger import append_forecast, make_forecast_record
+        ledger_path = getattr(args, "forecast_ledger", None) or "data/forecasts/ledger.jsonl"
+        n_saved = 0
+        for entry in bundles:
+            rec = make_forecast_record(entry)
+            append_forecast(rec, ledger_path)
+            n_saved += 1
+        print(f"Forecast ledger: {n_saved} records appended → {ledger_path}")
+    except Exception as _exc:  # noqa: BLE001
+        _logging.getLogger(__name__).warning(
+            "Forecast ledger append failed (non-fatal): %s", _exc
+        )
+
+    return 0
+
+
+def cmd_grade(args: argparse.Namespace, settings: Settings) -> int:
+    """Grade forecast ledger against actual results → calibration report per forecaster×market."""
+    import logging as _logging
+
+    from ball_quant.adapters.results import load_results
+    from ball_quant.core.forecast_ledger import (
+        calibration_report,
+        grade_forecasts,
+        load_forecasts,
+    )
+
+    _log = _logging.getLogger(__name__)
+
+    ledger_path = args.ledger or "data/forecasts/ledger.jsonl"
+    date_filter = getattr(args, "date", None) or None
+
+    records = load_forecasts(ledger_path, date=date_filter)
+    if not records:
+        print(f"No forecast records found in {ledger_path}" +
+              (f" for date {date_filter}" if date_filter else "") + ".")
+        return 0
+
+    outcomes = load_results(args.results)
+
+    grouped, n_excluded = grade_forecasts(records, outcomes)
+    report = calibration_report(grouped, n_excluded_post_kickoff=n_excluded)
+
+    # --- build table ---
+    header = f"{'Forecaster':<12} {'Market':<12} {'Brier':>8} {'LogLoss':>9} {'ECE':>8} {'N':>5}"
+    sep = "-" * len(header)
+    lines = [
+        f"# Calibration Report",
+        f"Ledger: {ledger_path}  |  Results: {args.results}",
+        (f"Date filter: {date_filter}" if date_filter else "Date filter: all"),
+        "",
+        sep,
+        header,
+        sep,
+    ]
+    for row in report["rows"]:
+        ece_str = f"{row['ece']:.6f}" if row["ece"] is not None else "    N/A"
+        lines.append(
+            f"{row['forecaster']:<12} {row['market_family']:<12} "
+            f"{row['brier']:>8.6f} {row['log_loss']:>9.6f} {ece_str:>8} {row['n']:>5}"
+        )
+    lines.append(sep)
+    lines.append("")
+    lines.append(f"Poly vs Elo 1X2: {report['poly_vs_elo_1x2']}")
+    lines.append(f"Excluded (post-kickoff): {report['n_excluded_post_kickoff']} records")
+
+    output = "\n".join(lines)
+    print(output)
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(output + "\n", encoding="utf-8")
+        print(f"\nReport written to {args.out}")
+
+    return 0
 
 
 def cmd_recommend(args: argparse.Namespace, settings: Settings) -> int:

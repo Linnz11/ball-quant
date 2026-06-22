@@ -361,5 +361,267 @@ class TestRecommendC500Cache(unittest.TestCase):
                 self.assertIn(field, bet, f"Missing field '{field}' in bet: {bet}")
 
 
+# ---------------------------------------------------------------------------
+# Test: kickoff datetime field (data-matchtime → TicaiOdds.kickoff)
+# ---------------------------------------------------------------------------
+
+# Real HTML snippet extracted from the SPF cassette (c500_spf.html, fixture 1359209
+# captured 2026-06-15 from 500.com via ssh jeffly@47.84.5.161).
+# The row carries data-matchdate="2026-06-16" + data-matchtime="00:00".
+_KICKOFF_FIXTURE_HTML = """\
+<html><body><table>
+<tr class="bet-tb-tr"
+    data-fixtureid="1359209" data-infomatchid="164905"
+    data-homesxname="西班牙" data-awaysxname="佛得角"
+    data-matchdate="2026-06-16" data-matchtime="00:00"
+    data-rangqiu="-2" data-simpleleague="世界杯"
+    data-id="2040174" data-homeid="12" data-awayid="152"
+    data-matchid="110" data-processid="376149"
+    data-processdate="2026-06-15" data-isshow="1"
+    data-processname="1013"
+    data-buyendtime="2026-06-15 22:00:00"
+    data-isactive="1"
+    data-subactive="bfdg:1,bfgg:1,bqdg:1,bqgg:1,dxqdg:0,dxqgg:0,hcdg:1,hcgg:1,jqdg:1,jqgg:1,nspfdg:0,nspfgg:0,spfdg:0,spfgg:1"
+    data-matchnum="周一013" data-isend="0" data-kdg="" style="display:">
+  <td><p class="betbtn" data-type="nspf" data-value="3" data-sp="1.55"></p></td>
+  <td><p class="betbtn" data-type="nspf" data-value="1" data-sp="3.80"></p></td>
+  <td><p class="betbtn" data-type="nspf" data-value="0" data-sp="8.50"></p></td>
+</tr>
+</table></body></html>
+"""
+
+
+class TestKickoffField(unittest.TestCase):
+    """Verify data-matchtime is parsed into TicaiOdds.kickoff as ISO-8601 CST."""
+
+    def setUp(self):
+        from ball_quant.adapters.c500 import parse_html
+        self.rows = parse_html(_KICKOFF_FIXTURE_HTML)
+
+    # ---- _MatchRow captures raw match_time ----------------------------------
+
+    def test_match_row_captures_match_time(self):
+        """_MatchRow.match_time must be populated from data-matchtime."""
+        self.assertEqual(len(self.rows), 1)
+        self.assertEqual(self.rows[0].match_time, "00:00")
+
+    def test_match_row_match_date_still_present(self):
+        self.assertEqual(self.rows[0].match_date, "2026-06-16")
+
+    # ---- TicaiOdds.kickoff via load_odds_from_fixtures ----------------------
+
+    def test_kickoff_iso_format_in_ticai_odds(self):
+        """Merged TicaiOdds must expose kickoff as 'YYYY-MM-DDTHH:MM'."""
+        from ball_quant.adapters.c500 import load_odds_from_fixtures
+        odds = load_odds_from_fixtures(
+            spf_html=_KICKOFF_FIXTURE_HTML,
+            crs_html=_KICKOFF_FIXTURE_HTML,
+            ttg_html=_KICKOFF_FIXTURE_HTML,
+            hafu_html=_KICKOFF_FIXTURE_HTML,
+        )
+        self.assertEqual(len(odds), 1)
+        self.assertEqual(odds[0].kickoff, "2026-06-16T00:00")
+
+    def test_kickoff_none_when_no_matchtime(self):
+        """When data-matchtime is absent the kickoff field must be None (no fabrication)."""
+        from ball_quant.adapters.c500 import load_odds_from_fixtures
+        no_time_html = """\
+<html><body><table>
+<tr class="bet-tb-tr"
+    data-fixtureid="9999999" data-homesxname="主队" data-awaysxname="客队"
+    data-matchdate="2026-06-16"
+    data-rangqiu="0" data-simpleleague="测试" data-matchnum="周一001"
+    data-subactive="nspfdg:1,nspfgg:1" style="display:">
+  <td><p class="betbtn" data-type="nspf" data-value="3" data-sp="2.00"></p></td>
+  <td><p class="betbtn" data-type="nspf" data-value="1" data-sp="3.00"></p></td>
+  <td><p class="betbtn" data-type="nspf" data-value="0" data-sp="4.00"></p></td>
+</tr>
+</table></body></html>
+"""
+        odds = load_odds_from_fixtures(
+            spf_html=no_time_html,
+            crs_html=no_time_html,
+            ttg_html=no_time_html,
+            hafu_html=no_time_html,
+        )
+        self.assertEqual(len(odds), 1)
+        self.assertIsNone(odds[0].kickoff)
+
+    # ---- Real cassette fixture carries kickoff -------------------------------
+
+    def test_kickoff_present_in_real_cassette_rows(self):
+        """All rows in the real SPF cassette must carry a non-None kickoff."""
+        from ball_quant.adapters.c500 import load_odds_from_fixtures
+        spf = _read("c500_spf.html")
+        crs = _read("c500_crs.html")
+        ttg = _read("c500_ttg.html")
+        hafu = _read("c500_hafu.html")
+        odds = load_odds_from_fixtures(spf, crs, ttg, hafu)
+        for o in odds:
+            self.assertIsNotNone(
+                o.kickoff,
+                f"kickoff is None for {o.match_id} ({o.home} vs {o.away})",
+            )
+            # Must be "YYYY-MM-DDTHH:MM"
+            import re
+            self.assertRegex(
+                o.kickoff,
+                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$",
+                f"kickoff format wrong for {o.match_id}: {o.kickoff!r}",
+            )
+
+    # ---- bundle dict carries kickoff ----------------------------------------
+
+    def test_bundle_dict_has_kickoff(self):
+        """build_bundle must include 'kickoff' in each per-match entry."""
+        from ball_quant.adapters.c500 import load_odds_from_fixtures
+        from ball_quant.core.bundle import build_bundle
+        from ball_quant.models import EventMarketMatrix
+
+        spf = _read("c500_spf.html")
+        crs = _read("c500_crs.html")
+        ttg = _read("c500_ttg.html")
+        hafu = _read("c500_hafu.html")
+        odds = load_odds_from_fixtures(spf, crs, ttg, hafu)
+
+        # Build minimal EventMarketMatrix stubs so build_bundle can pair them.
+        matrices = [
+            EventMarketMatrix(
+                match_id=o.match_id,
+                home=o.home,
+                away=o.away,
+                markets=[],
+            )
+            for o in odds
+        ]
+        bundles = build_bundle(list(zip(odds, matrices)))
+        for b in bundles:
+            self.assertIn("kickoff", b, f"'kickoff' key missing from bundle: {b}")
+            # Value is either a string matching ISO pattern or None
+            if b["kickoff"] is not None:
+                import re
+                self.assertRegex(
+                    b["kickoff"],
+                    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$",
+                    f"kickoff format wrong in bundle: {b['kickoff']!r}",
+                )
+
+
+# ---------------------------------------------------------------------------
+# Test: bet_close datetime field (data-buyendtime → TicaiOdds.bet_close)
+# ---------------------------------------------------------------------------
+
+class TestBetCloseField(unittest.TestCase):
+    """Verify data-buyendtime is parsed into TicaiOdds.bet_close as ISO-8601 CST.
+
+    The existing _KICKOFF_FIXTURE_HTML already carries data-buyendtime="2026-06-15 22:00:00",
+    so no new HTML fixture is needed — we reuse the same row.
+    """
+
+    # ---- _MatchRow captures raw buy_end_time --------------------------------
+
+    def test_match_row_captures_buy_end_time(self):
+        """_MatchRow.buy_end_time must be populated from data-buyendtime."""
+        from ball_quant.adapters.c500 import parse_html
+        rows = parse_html(_KICKOFF_FIXTURE_HTML)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].buy_end_time, "2026-06-15 22:00:00")
+
+    # ---- TicaiOdds.bet_close via load_odds_from_fixtures --------------------
+
+    def test_bet_close_iso_format_in_ticai_odds(self):
+        """Merged TicaiOdds must expose bet_close as 'YYYY-MM-DDTHH:MM:SS'."""
+        from ball_quant.adapters.c500 import load_odds_from_fixtures
+        odds = load_odds_from_fixtures(
+            spf_html=_KICKOFF_FIXTURE_HTML,
+            crs_html=_KICKOFF_FIXTURE_HTML,
+            ttg_html=_KICKOFF_FIXTURE_HTML,
+            hafu_html=_KICKOFF_FIXTURE_HTML,
+        )
+        self.assertEqual(len(odds), 1)
+        self.assertEqual(odds[0].bet_close, "2026-06-15T22:00:00")
+
+    def test_bet_close_none_when_no_buyendtime(self):
+        """When data-buyendtime is absent the bet_close field must be None (no fabrication)."""
+        from ball_quant.adapters.c500 import load_odds_from_fixtures
+        no_bc_html = """\
+<html><body><table>
+<tr class="bet-tb-tr"
+    data-fixtureid="9999998" data-homesxname="主队" data-awaysxname="客队"
+    data-matchdate="2026-06-16" data-matchtime="00:00"
+    data-rangqiu="0" data-simpleleague="测试" data-matchnum="周一002"
+    data-subactive="nspfdg:1,nspfgg:1" style="display:">
+  <td><p class="betbtn" data-type="nspf" data-value="3" data-sp="2.00"></p></td>
+  <td><p class="betbtn" data-type="nspf" data-value="1" data-sp="3.00"></p></td>
+  <td><p class="betbtn" data-type="nspf" data-value="0" data-sp="4.00"></p></td>
+</tr>
+</table></body></html>
+"""
+        odds = load_odds_from_fixtures(
+            spf_html=no_bc_html,
+            crs_html=no_bc_html,
+            ttg_html=no_bc_html,
+            hafu_html=no_bc_html,
+        )
+        self.assertEqual(len(odds), 1)
+        self.assertIsNone(odds[0].bet_close)
+
+    # ---- Real cassette rows carry bet_close ---------------------------------
+
+    def test_bet_close_present_in_real_cassette_rows(self):
+        """All rows in the real SPF cassette must carry a non-None bet_close."""
+        import re
+        from ball_quant.adapters.c500 import load_odds_from_fixtures
+        spf = _read("c500_spf.html")
+        crs = _read("c500_crs.html")
+        ttg = _read("c500_ttg.html")
+        hafu = _read("c500_hafu.html")
+        odds = load_odds_from_fixtures(spf, crs, ttg, hafu)
+        for o in odds:
+            self.assertIsNotNone(
+                o.bet_close,
+                f"bet_close is None for {o.match_id} ({o.home} vs {o.away})",
+            )
+            # Must be "YYYY-MM-DDTHH:MM:SS"
+            self.assertRegex(
+                o.bet_close,
+                r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$",
+                f"bet_close format wrong for {o.match_id}: {o.bet_close!r}",
+            )
+
+    # ---- bundle dict carries bet_close --------------------------------------
+
+    def test_bundle_dict_has_bet_close(self):
+        """build_bundle must include 'bet_close' in each per-match entry."""
+        import re
+        from ball_quant.adapters.c500 import load_odds_from_fixtures
+        from ball_quant.core.bundle import build_bundle
+        from ball_quant.models import EventMarketMatrix
+
+        spf = _read("c500_spf.html")
+        crs = _read("c500_crs.html")
+        ttg = _read("c500_ttg.html")
+        hafu = _read("c500_hafu.html")
+        odds = load_odds_from_fixtures(spf, crs, ttg, hafu)
+        matrices = [
+            EventMarketMatrix(
+                match_id=o.match_id,
+                home=o.home,
+                away=o.away,
+                markets=[],
+            )
+            for o in odds
+        ]
+        bundles = build_bundle(list(zip(odds, matrices)))
+        for b in bundles:
+            self.assertIn("bet_close", b, f"'bet_close' key missing from bundle: {b}")
+            if b["bet_close"] is not None:
+                self.assertRegex(
+                    b["bet_close"],
+                    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$",
+                    f"bet_close format wrong in bundle: {b['bet_close']!r}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
