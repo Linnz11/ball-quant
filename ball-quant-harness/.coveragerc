@@ -1,0 +1,9 @@
+[run]
+source = src
+omit =
+    */adapters/polymarket.py
+    */cli.py
+
+[report]
+fail_under = 75
+show_missing = true

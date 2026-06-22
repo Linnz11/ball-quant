@@ -1,0 +1,18 @@
+{
+  "response": [
+    {
+      "team": {"id": 10, "name": "Netherlands"},
+      "formation": "4-3-3",
+      "startXI": [
+        {"player": {"id": 501, "name": "Bart Verbruggen", "number": 1, "pos": "G"}}
+      ]
+    },
+    {
+      "team": {"id": 20, "name": "Japan"},
+      "formation": "4-2-3-1",
+      "startXI": [
+        {"player": {"id": 601, "name": "Zion Suzuki", "number": 23, "pos": "G"}}
+      ]
+    }
+  ]
+}

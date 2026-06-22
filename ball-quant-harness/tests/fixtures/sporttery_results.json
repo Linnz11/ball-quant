@@ -1,0 +1,20 @@
+{
+  "errorCode": "0",
+  "errorMessage": "",
+  "payload": {
+    "value": {
+      "list": [
+        {
+          "matchId": "M001",
+          "homeScore": "2",
+          "awayScore": "1"
+        },
+        {
+          "matchId": "M002",
+          "homeScore": "0",
+          "awayScore": "3"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ball-quant"
+version = "0.1.0"
+description = "Daily football betting market research system for Polymarket, China Sports Lottery SP, probability mapping, EV, and portfolio staking."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name = "Codex" }
+]
+dependencies = []
+
+[project.scripts]
+ballq = "ball_quant.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

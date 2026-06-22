@@ -1,0 +1,40 @@
+{
+  "response": [
+    {
+      "fixture": {
+        "id": 99001,
+        "date": "2026-06-14T15:00:00+00:00",
+        "status": {
+          "long": "Not Started",
+          "short": "NS"
+        }
+      },
+      "league": {
+        "id": 1,
+        "name": "World Cup",
+        "country": "World",
+        "season": 2026
+      },
+      "teams": {
+        "home": {
+          "id": 10,
+          "name": "Netherlands",
+          "winner": null
+        },
+        "away": {
+          "id": 20,
+          "name": "Japan",
+          "winner": null
+        }
+      },
+      "goals": {
+        "home": null,
+        "away": null
+      },
+      "score": {
+        "halftime": {"home": null, "away": null},
+        "fulltime": {"home": null, "away": null}
+      }
+    }
+  ]
+}

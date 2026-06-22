@@ -1,0 +1,235 @@
+{
+  "matches": {
+    "001": {
+      "home": "Netherlands",
+      "away": "Japan",
+      "event_slug": "netherlands-vs-japan-sample",
+      "markets": [
+        {
+          "market_id": "m001-ml",
+          "question": "Netherlands vs Japan winner",
+          "category": "moneyline",
+          "outcome": "home",
+          "probability": 0.62,
+          "token_id": null,
+          "bid": 0.61,
+          "ask": 0.63,
+          "spread": 0.02,
+          "liquidity": 18000,
+          "volume": 90000,
+          "raw": {}
+        },
+        {
+          "market_id": "m001-ml",
+          "question": "Netherlands vs Japan winner",
+          "category": "moneyline",
+          "outcome": "draw",
+          "probability": 0.22,
+          "token_id": null,
+          "bid": 0.21,
+          "ask": 0.23,
+          "spread": 0.02,
+          "liquidity": 18000,
+          "volume": 90000,
+          "raw": {}
+        },
+        {
+          "market_id": "m001-ml",
+          "question": "Netherlands vs Japan winner",
+          "category": "moneyline",
+          "outcome": "away",
+          "probability": 0.16,
+          "token_id": null,
+          "bid": 0.15,
+          "ask": 0.17,
+          "spread": 0.02,
+          "liquidity": 18000,
+          "volume": 90000,
+          "raw": {}
+        },
+        {
+          "market_id": "m001-h",
+          "question": "Netherlands -1.5 handicap vs Japan",
+          "category": "handicap",
+          "outcome": "Netherlands -1.5",
+          "probability": 0.34,
+          "token_id": null,
+          "bid": 0.33,
+          "ask": 0.35,
+          "spread": 0.02,
+          "liquidity": 12000,
+          "volume": 50000,
+          "raw": {}
+        },
+        {
+          "market_id": "m001-h2",
+          "question": "Japan +0.5 handicap vs Netherlands",
+          "category": "handicap",
+          "outcome": "Japan +0.5",
+          "probability": 0.38,
+          "token_id": null,
+          "bid": 0.37,
+          "ask": 0.39,
+          "spread": 0.02,
+          "liquidity": 12000,
+          "volume": 50000,
+          "raw": {}
+        }
+      ]
+    },
+    "002": {
+      "home": "Ivory Coast",
+      "away": "Sweden",
+      "event_slug": "ivory-coast-vs-sweden-sample",
+      "markets": [
+        {
+          "market_id": "m002-ml",
+          "question": "Ivory Coast vs Sweden winner",
+          "category": "moneyline",
+          "outcome": "home",
+          "probability": 0.36,
+          "token_id": null,
+          "bid": 0.35,
+          "ask": 0.37,
+          "spread": 0.02,
+          "liquidity": 15000,
+          "volume": 75000,
+          "raw": {}
+        },
+        {
+          "market_id": "m002-ml",
+          "question": "Ivory Coast vs Sweden winner",
+          "category": "moneyline",
+          "outcome": "draw",
+          "probability": 0.27,
+          "token_id": null,
+          "bid": 0.26,
+          "ask": 0.28,
+          "spread": 0.02,
+          "liquidity": 15000,
+          "volume": 75000,
+          "raw": {}
+        },
+        {
+          "market_id": "m002-ml",
+          "question": "Ivory Coast vs Sweden winner",
+          "category": "moneyline",
+          "outcome": "away",
+          "probability": 0.37,
+          "token_id": null,
+          "bid": 0.36,
+          "ask": 0.38,
+          "spread": 0.02,
+          "liquidity": 15000,
+          "volume": 75000,
+          "raw": {}
+        },
+        {
+          "market_id": "m002-h",
+          "question": "Ivory Coast +0.5 handicap vs Sweden",
+          "category": "handicap",
+          "outcome": "Ivory Coast +0.5",
+          "probability": 0.63,
+          "token_id": null,
+          "bid": 0.62,
+          "ask": 0.64,
+          "spread": 0.02,
+          "liquidity": 9000,
+          "volume": 40000,
+          "raw": {}
+        },
+        {
+          "market_id": "m002-h2",
+          "question": "Sweden -1.5 handicap vs Ivory Coast",
+          "category": "handicap",
+          "outcome": "Sweden -1.5",
+          "probability": 0.18,
+          "token_id": null,
+          "bid": 0.17,
+          "ask": 0.19,
+          "spread": 0.02,
+          "liquidity": 9000,
+          "volume": 40000,
+          "raw": {}
+        }
+      ]
+    },
+    "003": {
+      "home": "Germany",
+      "away": "Chile",
+      "event_slug": "germany-vs-chile-sample",
+      "markets": [
+        {
+          "market_id": "m003-ml",
+          "question": "Germany vs Chile winner",
+          "category": "moneyline",
+          "outcome": "home",
+          "probability": 0.82,
+          "token_id": null,
+          "bid": 0.81,
+          "ask": 0.83,
+          "spread": 0.02,
+          "liquidity": 25000,
+          "volume": 120000,
+          "raw": {}
+        },
+        {
+          "market_id": "m003-ml",
+          "question": "Germany vs Chile winner",
+          "category": "moneyline",
+          "outcome": "draw",
+          "probability": 0.12,
+          "token_id": null,
+          "bid": 0.11,
+          "ask": 0.13,
+          "spread": 0.02,
+          "liquidity": 25000,
+          "volume": 120000,
+          "raw": {}
+        },
+        {
+          "market_id": "m003-ml",
+          "question": "Germany vs Chile winner",
+          "category": "moneyline",
+          "outcome": "away",
+          "probability": 0.06,
+          "token_id": null,
+          "bid": 0.05,
+          "ask": 0.07,
+          "spread": 0.02,
+          "liquidity": 25000,
+          "volume": 120000,
+          "raw": {}
+        },
+        {
+          "market_id": "m003-h",
+          "question": "Germany -3.5 handicap vs Chile",
+          "category": "handicap",
+          "outcome": "Germany -3.5",
+          "probability": 0.41,
+          "token_id": null,
+          "bid": 0.40,
+          "ask": 0.42,
+          "spread": 0.02,
+          "liquidity": 14000,
+          "volume": 60000,
+          "raw": {}
+        },
+        {
+          "market_id": "m003-h2",
+          "question": "Chile +2.5 handicap vs Germany",
+          "category": "handicap",
+          "outcome": "Chile +2.5",
+          "probability": 0.37,
+          "token_id": null,
+          "bid": 0.36,
+          "ask": 0.38,
+          "spread": 0.02,
+          "liquidity": 14000,
+          "volume": 60000,
+          "raw": {}
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "response": [
+    {
+      "player": {
+        "id": 501,
+        "name": "Virgil van Dijk",
+        "reason": "Knee injury"
+      },
+      "team": {
+        "id": 10,
+        "name": "Netherlands"
+      }
+    },
+    {
+      "player": {
+        "id": 601,
+        "name": "Takumi Minamino",
+        "reason": "Suspension"
+      },
+      "team": {
+        "id": 20,
+        "name": "Japan"
+      }
+    }
+  ]
+}
