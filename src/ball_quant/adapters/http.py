@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib import parse, request
+
+_logger = logging.getLogger(__name__)
 
 
 class HttpError(RuntimeError):
@@ -30,11 +33,15 @@ def get_json(
         with request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8")
     except Exception as exc:  # pragma: no cover - network varies by environment.
+        # Log before re-raising so ops dashboards can correlate URL + error without
+        # needing to reconstruct the request from the exception chain.
+        _logger.warning("HTTP request failed: url=%s error=%r", url, exc)
         raise HttpError(f"GET {url} failed: {exc}") from exc
 
     try:
         payload = json.loads(body)
     except json.JSONDecodeError as exc:
+        _logger.warning("HTTP non-JSON response: url=%s", url)
         raise HttpError(f"GET {url} returned non-JSON response") from exc
 
     if cache_path:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from math import sqrt
 from typing import Dict, List
 
+from ball_quant.core.params import DEFAULT_PARAMS, StrategyParams
 from ball_quant.models import Combo
 
 
@@ -10,12 +11,12 @@ def allocate_stakes(
     combo_groups: Dict[str, List[Combo]],
     budget: float,
     unit: int = 2,
-    fractional_kelly: float = 0.25,
+    params: StrategyParams = DEFAULT_PARAMS,
 ) -> List[Combo]:
     budgets = {
-        "A": budget * 0.60,
-        "B": budget * 0.30,
-        "C": min(budget * 0.10, budget * 0.15),
+        "A": budget * params.budget_a,
+        "B": budget * params.budget_b,
+        "C": min(budget * params.budget_c, budget * 0.15),
     }
     allocated: List[Combo] = []
     for key in ("A", "B", "C"):
@@ -26,8 +27,8 @@ def allocate_stakes(
         total = sum(weights) or 1.0
         for combo, weight in zip(combos, weights):
             raw_stake = budgets[key] * weight / total
-            kelly_cap = budget * max(0.0, combo.kelly) * fractional_kelly
-            type_cap = max_type_stake(budget, key)
+            kelly_cap = budget * max(0.0, combo.kelly) * params.fractional_kelly
+            type_cap = max_type_stake(budget, key, params=params)
             stake = round_down_unit(min(raw_stake, kelly_cap, type_cap), unit)
             combo.stake = stake
             combo.payout = stake * combo.odds
@@ -48,12 +49,16 @@ def combo_weight(combo: Combo, key: str) -> float:
     return min(combo.odds / 10.0, 2.0) * combo.kelly * combo.probability
 
 
-def max_type_stake(budget: float, key: str) -> float:
+def max_type_stake(
+    budget: float,
+    key: str,
+    params: StrategyParams = DEFAULT_PARAMS,
+) -> float:
     if key == "A":
-        return budget * 0.35
+        return budget * params.cap_a
     if key == "B":
-        return budget * 0.20
-    return budget * 0.075
+        return budget * params.cap_b
+    return budget * params.cap_c
 
 
 def trim_to_budget(combos: List[Combo], budget: float, unit: int) -> None:

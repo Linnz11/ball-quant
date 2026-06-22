@@ -1,0 +1,26 @@
+{
+  "response": [
+    {
+      "team": {
+        "id": 10,
+        "name": "Netherlands"
+      },
+      "statistics": [
+        {"type": "Shots on Goal", "value": 7},
+        {"type": "Ball Possession", "value": "58%"},
+        {"type": "expected_goals", "value": "1.82"}
+      ]
+    },
+    {
+      "team": {
+        "id": 20,
+        "name": "Japan"
+      },
+      "statistics": [
+        {"type": "Shots on Goal", "value": 3},
+        {"type": "Ball Possession", "value": "42%"},
+        {"type": "expected_goals", "value": "0.91"}
+      ]
+    }
+  ]
+}

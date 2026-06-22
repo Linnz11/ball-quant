@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from html.parser import HTMLParser
@@ -10,6 +11,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from ball_quant.adapters.http import HttpError, get_json, get_text
 from ball_quant.core.causal import causal_profile_for_category
 from ball_quant.models import EventMarketMatrix, MarketQuote, MatchSP, normalize_key
+
+_logger = logging.getLogger(__name__)
 
 
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
@@ -50,11 +53,26 @@ class PolymarketClient:
 
         try:
             events = self.search_events(match)
-        except HttpError:
+        except HttpError as _exc:
+            # Network failure falls back to an empty matrix so upstream analysis
+            # can still run; warn so ops can detect connectivity problems.
+            _logger.warning(
+                "discover_event: network error for match_id=%r (%s v %s): %s",
+                match.match_id,
+                match.home,
+                match.away,
+                _exc,
+            )
             return empty_matrix(match, "polymarket-network-error")
 
         event = pick_best_event(as_list(events), match, competition)
         if not event:
+            _logger.warning(
+                "discover_event: no matching event found for match_id=%r (%s v %s)",
+                match.match_id,
+                match.home,
+                match.away,
+            )
             return empty_matrix(match, "event-not-found")
         event = self.prefer_sports_event(event, competition)
         matrix = self.event_to_matrix(match, event)
@@ -199,7 +217,16 @@ class PolymarketClient:
         league = sports_league_from_event(event, competition)
         try:
             sports_event = self.get_sports_event_by_slug(str(slug), league=league)
-        except HttpError:
+        except HttpError as _exc:
+            # Sports-page enrichment is best-effort: fall back to gamma event
+            # without crashing.  Log so the caller can tell whether enrichment
+            # actually happened for this slug.
+            _logger.warning(
+                "prefer_sports_event: sports-page fetch failed for slug=%r league=%r: %s",
+                slug,
+                league,
+                _exc,
+            )
             return event
         if len(sports_event.get("markets") or []) >= len(event.get("markets") or []):
             return merge_event_metadata(event, sports_event)
@@ -239,7 +266,15 @@ class PolymarketClient:
                 break
             try:
                 book = get_json(self.clob_base_url, "/book", params={"token_id": quote.token_id})
-            except HttpError:
+            except HttpError as _exc:
+                # Per-quote CLOB failure is non-fatal: log so it's visible in ops
+                # without crashing the enrichment loop for the rest of the quotes.
+                _logger.warning(
+                    "CLOB enrichment skipped for token_id=%s outcome=%r: %s",
+                    quote.token_id,
+                    quote.outcome,
+                    _exc,
+                )
                 continue
             bid, ask = best_bid_ask(book)
             quote.bid = bid

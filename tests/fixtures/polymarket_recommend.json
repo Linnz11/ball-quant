@@ -1,0 +1,71 @@
+{
+  "fetched_at": 1718323200.0,
+  "matrices": [
+    {
+      "match_id": "poly-manchestercity-arsenal-2026-06-14",
+      "home": "Manchester City",
+      "away": "Arsenal",
+      "event_id": "poly-mc-ars-001",
+      "event_slug": "manchestercity-arsenal-2026-06-14",
+      "raw_event": {
+        "start_date": "2026-06-14"
+      },
+      "markets": [
+        {
+          "market_id": "ml-home",
+          "question": "Manchester City to win?",
+          "category": "moneyline",
+          "outcome": "home",
+          "probability": 0.55,
+          "bid": 0.54,
+          "ask": 0.56,
+          "spread": 0.02,
+          "liquidity": 15000.0,
+          "volume": 50000.0,
+          "causal_layer": "core",
+          "model_weight": 1.0,
+          "is_complement": false,
+          "active": true,
+          "closed": false,
+          "accepting_orders": true
+        },
+        {
+          "market_id": "ml-draw",
+          "question": "Draw?",
+          "category": "moneyline",
+          "outcome": "draw",
+          "probability": 0.25,
+          "bid": 0.24,
+          "ask": 0.26,
+          "spread": 0.02,
+          "liquidity": 12000.0,
+          "volume": 35000.0,
+          "causal_layer": "core",
+          "model_weight": 1.0,
+          "is_complement": false,
+          "active": true,
+          "closed": false,
+          "accepting_orders": true
+        },
+        {
+          "market_id": "ml-away",
+          "question": "Arsenal to win?",
+          "category": "moneyline",
+          "outcome": "away",
+          "probability": 0.20,
+          "bid": 0.19,
+          "ask": 0.21,
+          "spread": 0.02,
+          "liquidity": 10000.0,
+          "volume": 30000.0,
+          "causal_layer": "core",
+          "model_weight": 1.0,
+          "is_complement": false,
+          "active": true,
+          "closed": false,
+          "accepting_orders": true
+        }
+      ]
+    }
+  ]
+}

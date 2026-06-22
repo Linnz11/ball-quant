@@ -2,15 +2,21 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
+from ball_quant.core.params import DEFAULT_PARAMS, StrategyParams
 from ball_quant.core.probability import build_probability_context, match_branches
 from ball_quant.core.value import selections_from_branches
 from ball_quant.models import EventMarketMatrix, MatchAnalysis, MatchSP, TeamFacts
 
 
-def analyze_match(match: MatchSP, matrix: EventMarketMatrix, facts: TeamFacts) -> MatchAnalysis:
-    context = build_probability_context(match, matrix)
+def analyze_match(
+    match: MatchSP,
+    matrix: EventMarketMatrix,
+    facts: TeamFacts,
+    params: StrategyParams = DEFAULT_PARAMS,
+) -> MatchAnalysis:
+    context = build_probability_context(match, matrix, params=params)
     branches = match_branches(match, context)
-    selections = selections_from_branches(match, matrix, facts, branches)
+    selections = selections_from_branches(match, matrix, facts, branches, params=params)
     sp_lookup = {
         ("spf", "home"): match.spf_home,
         ("spf", "draw"): match.spf_draw,
